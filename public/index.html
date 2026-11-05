@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>网盘聚合搜索 API</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔍</text></svg>">
+<style>
+  :root{
+    --bg:#0b0f17; --panel:#121826; --panel-2:#182131; --line:#243044;
+    --text:#e6edf7; --muted:#8b9bb4; --accent:#4c8dff; --accent-2:#2ad4a4;
+    --warn:#ffb02e; --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:radial-gradient(1200px 600px at 50% -10%,#16233a 0%,var(--bg) 55%) fixed;
+    color:var(--text); font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    min-height:100vh; padding:40px 16px 64px;
+  }
+  .wrap{max-width:880px;margin:0 auto}
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:22px}
+  h1{font-size:22px;margin:0;font-weight:650;letter-spacing:.3px}
+  .badge{font-size:12px;color:var(--muted);border:1px solid var(--line);background:var(--panel);padding:3px 9px;border-radius:999px}
+  .badge b{color:var(--accent-2);font-weight:600}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px;box-shadow:0 10px 30px rgba(0,0,0,.28)}
+  .searchbar{display:flex;gap:10px}
+  input[type=text]{
+    flex:1;min-width:0;background:var(--panel-2);border:1px solid var(--line);color:var(--text);
+    border-radius:10px;padding:12px 14px;font-size:15px;outline:none;transition:border-color .15s,box-shadow .15s
+  }
+  input[type=text]:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(76,141,255,.16)}
+  button{
+    border:0;border-radius:10px;padding:12px 22px;font-size:15px;font-weight:600;cursor:pointer;
+    background:linear-gradient(135deg,#4c8dff,#3b6fe0);color:#fff;transition:transform .08s,filter .15s;white-space:nowrap
+  }
+  button:hover{filter:brightness(1.08)}
+  button:active{transform:translateY(1px)}
+  button:disabled{opacity:.55;cursor:not-allowed}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+  .chip{
+    font-size:13px;color:var(--muted);background:var(--panel-2);border:1px solid var(--line);
+    padding:6px 12px;border-radius:999px;cursor:pointer;user-select:none;transition:all .15s
+  }
+  .chip:hover{color:var(--text);border-color:#33425c}
+  .chip.on{color:#fff;background:rgba(76,141,255,.18);border-color:var(--accent)}
+  .hint{font-size:12.5px;color:var(--muted);margin-top:12px;word-break:break-all}
+  .hint code{background:var(--panel-2);border:1px solid var(--line);padding:1px 6px;border-radius:6px;color:#b9c9e2}
+  .status{margin-top:18px;font-size:14px;color:var(--muted);min-height:22px}
+  .status.err{color:#ff7a7a}
+  .group{margin-top:20px}
+  .group-head{display:flex;align-items:center;gap:10px;margin:0 0 10px;font-size:14px;color:var(--muted)}
+  .group-head .dot{width:7px;height:7px;border-radius:50%;background:var(--accent)}
+  .group-head b{color:var(--text);font-weight:600}
+  .item{
+    display:flex;align-items:center;gap:12px;background:var(--panel-2);border:1px solid var(--line);
+    border-radius:11px;padding:11px 13px;margin-bottom:8px;transition:border-color .15s
+  }
+  .item:hover{border-color:#33425c}
+  .item .main{flex:1;min-width:0}
+  .item .title{font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .item .meta{font-size:12px;color:var(--muted);margin-top:3px;display:flex;gap:10px;flex-wrap:wrap}
+  .item .meta a{color:#7aa9ff;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+  .item a:hover{text-decoration:underline}
+  .pwd{font-size:12px;color:#0b0f17;background:var(--warn);border-radius:6px;padding:2px 7px;font-weight:700}
+  .copy{
+    background:transparent;border:1px solid var(--line);color:var(--muted);font-size:12.5px;font-weight:500;
+    padding:7px 13px;border-radius:8px;flex:none
+  }
+  .copy:hover{color:var(--text);border-color:var(--accent);filter:none}
+  .copy.done{color:var(--accent-2);border-color:var(--accent-2)}
+  details{margin-top:22px;border-top:1px solid var(--line);padding-top:14px}
+  summary{cursor:pointer;font-size:13.5px;color:var(--muted);outline:none}
+  summary:hover{color:var(--text)}
+  pre{background:#0a0e15;border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;font-size:12.5px;line-height:1.55;color:#b9c9e2;max-height:420px}
+  footer{text-align:center;color:#5c6b82;font-size:12px;margin-top:36px}
+  footer a{color:#7aa9ff;text-decoration:none}
+  @media (max-width:560px){
+    body{padding:24px 12px 48px}
+    .searchbar{flex-direction:column}
+    button{width:100%}
+    .item{flex-wrap:wrap}
+    .copy{width:100%}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>网盘聚合搜索 API</h1>
+    <span class="badge" id="health">加载中…</span>
+  </header>
+
+  <div class="panel">
+    <div class="searchbar">
+      <input id="kw" type="text" placeholder="输入关键词，例如：无主之地 / 凡人修仙传" autocomplete="off">
+      <button id="btn">搜索</button>
+    </div>
+
+    <div class="chips" id="chips"></div>
+
+    <div class="hint">
+      接口：<code id="apiUrl">/api/search?kw=</code>
+    </div>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div id="results"></div>
+
+  <details id="rawBox" hidden>
+    <summary>查看原始 JSON</summary>
+    <pre id="raw"></pre>
+  </details>
+
+  <footer>
+    Cloudflare Pages Functions · 聚合 TG 频道与多个网盘搜索引擎 · <a href="/api/health">/api/health</a>
+  </footer>
+</div>
+
+<script>
+const TYPES = [
+  ['quark','夸克'], ['uc','UC'], ['aliyun','阿里'], ['baidu','百度'],
+  ['xunlei','迅雷'], ['123','123'], ['115','115'], ['tianyi','天翼'],
+  ['mobile','移动'], ['pikpak','PikPak'], ['magnet','磁力'], ['ed2k','电驴']
+];
+const selected = new Set();
+const $ = id => document.getElementById(id);
+
+// 类型筛选 chips
+const chipsEl = $('chips');
+TYPES.forEach(([key, label]) => {
+  const el = document.createElement('span');
+  el.className = 'chip';
+  el.textContent = label;
+  el.dataset.key = key;
+  el.onclick = () => {
+    if (selected.has(key)) { selected.delete(key); el.classList.remove('on'); }
+    else { selected.add(key); el.classList.add('on'); }
+    updateApiHint();
+  };
+  chipsEl.appendChild(el);
+});
+
+function buildUrl(kw) {
+  const params = new URLSearchParams();
+  params.set('kw', kw);
+  if (selected.size) params.set('cloud_types', [...selected].join(','));
+  return '/api/search?' + params.toString();
+}
+
+function updateApiHint() {
+  const kw = $('kw').value.trim();
+  $('apiUrl').textContent = buildUrl(kw ? encodeURIComponent(kw) : '关键词');
+}
+
+function fmtTime(s) {
+  if (!s || s.startsWith('0001-01-01')) return '';
+  const d = new Date(s);
+  if (isNaN(d)) return '';
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+function typeLabel(key) {
+  const hit = TYPES.find(t => t[0] === key);
+  return hit ? hit[1] : key;
+}
+
+// 健康检查
+fetch('/api/health').then(r => r.json()).then(j => {
+  const d = j.data || {};
+  $('health').innerHTML = '插件 <b>' + (d.plugins || []).length + '</b> 个 · TG 频道 <b>' + (d.channels || 0) + '</b> 个';
+}).catch(() => { $('health').textContent = '接口未就绪'; });
+
+async function doSearch() {
+  const kw = $('kw').value.trim();
+  if (!kw) { $('kw').focus(); return; }
+
+  const btn = $('btn'), statusEl = $('status'), resultsEl = $('results');
+  btn.disabled = true;
+  statusEl.className = 'status';
+  statusEl.textContent = '搜索中…（并发请求所有源，通常 1–5 秒）';
+  resultsEl.innerHTML = '';
+  $('rawBox').hidden = true;
+
+  const t0 = performance.now();
+  try {
+    const resp = await fetch(buildUrl(kw));
+    const body = await resp.json();
+    const took = Math.round(performance.now() - t0);
+
+    if (body.code !== 0) {
+      statusEl.className = 'status err';
+      statusEl.textContent = '错误 ' + body.code + '：' + (body.message || '未知错误');
+      $('raw').textContent = JSON.stringify(body, null, 2);
+      $('rawBox').hidden = false;
+      return;
+    }
+
+    const data = body.data || {};
+    const groups = Object.entries(data.merged_by_type || {});
+    statusEl.textContent = '共 ' + (data.total || 0) + ' 条结果 · 耗时 ' + took + ' ms';
+
+    if (!groups.length) {
+      resultsEl.innerHTML = '<div class="panel" style="margin-top:20px;color:var(--muted)">没有搜索到结果，换个关键词或调整网盘类型试试。</div>';
+    }
+
+    groups.sort((a, b) => b[1].length - a[1].length);
+    for (const [type, list] of groups) {
+      const groupEl = document.createElement('div');
+      groupEl.className = 'group';
+      const head = document.createElement('div');
+      head.className = 'group-head';
+      head.innerHTML = '<span class="dot"></span><b>' + typeLabel(type) + '</b><span>' + list.length + ' 条</span>';
+      groupEl.appendChild(head);
+
+      for (const item of list) {
+        const row = document.createElement('div');
+        row.className = 'item';
+
+        const time = fmtTime(item.datetime);
+        const meta = [];
+        if (item.password) meta.push('<span class="pwd">提取码 ' + item.password + '</span>');
+        meta.push('<a href="' + item.url + '" target="_blank" rel="noreferrer noopener">' + item.url + '</a>');
+        if (time) meta.push('<span>' + time + '</span>');
+
+        row.innerHTML =
+          '<div class="main">' +
+            '<div class="title">' + (item.note || '（无标题）').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])) + '</div>' +
+            '<div class="meta">' + meta.join('<span>·</span>') + '</div>' +
+          '</div>' +
+          '<button class="copy">复制链接</button>';
+
+        const copyBtn = row.querySelector('.copy');
+        copyBtn.onclick = async () => {
+          const text = item.password ? item.url + ' 提取码 ' + item.password : item.url;
+          try { await navigator.clipboard.writeText(text); } catch (e) { window.prompt('手动复制', text); }
+          copyBtn.textContent = '已复制';
+          copyBtn.classList.add('done');
+          setTimeout(() => { copyBtn.textContent = '复制链接'; copyBtn.classList.remove('done'); }, 1400);
+        };
+
+        groupEl.appendChild(row);
+      }
+      resultsEl.appendChild(groupEl);
+    }
+
+    $('raw').textContent = JSON.stringify(body, null, 2);
+    $('rawBox').hidden = false;
+  } catch (e) {
+    statusEl.className = 'status err';
+    statusEl.textContent = '请求失败：' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$('btn').onclick = doSearch;
+$('kw').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+$('kw').addEventListener('input', updateApiHint);
+updateApiHint();
+</script>
+</body>
+</html>

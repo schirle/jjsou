@@ -1,10 +1,11 @@
-# Cloudflare Pages Git 集成会读取本文件：
-#   name                  → Pages 项目名（jjsou）
-#   pages_build_output_dir → 构建输出目录（项目根，index.html 所在处）
-#   functions/            → 自动识别为 Functions，无需配置
+# Cloudflare Pages 项目结构约定（重要）：
+#   public/     → 构建输出目录（静态资产：index.html）
+#   functions/  → Pages Functions，必须位于构建输出目录之外（仓库根）
 #
-# 本项目不在 wrangler.toml 里放变量，全部在
-# Cloudflare Dashboard → 项目 → Settings → Variables and Secrets 中维护
+# 因此在 Dashboard → Settings → Build 里「构建输出目录」要填：public
+# （若填 / 或留空，functions/ 会落入输出目录内部，被当成静态文件，接口全部 404）
+#
+# 变量不放这里，统一在 Dashboard → Settings → Variables and Secrets 维护
 name = "jjsou"
 compatibility_date = "2025-07-12"
-pages_build_output_dir = "."
+pages_build_output_dir = "public"

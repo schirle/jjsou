@@ -55,7 +55,7 @@ function transform(code, label = '', allowDefault = false) {
 const parts = [];
 
 // 内联首页，供单文件 Worker 直接返回
-const html = readFileSync('index.html', 'utf8');
+const html = readFileSync('public/index.html', 'utf8');
 parts.push('// 由 build.mjs 生成，请勿直接编辑；改动请改 functions/ 下的源码后重新打包\n');
 parts.push('const INDEX_HTML = ' + JSON.stringify(html) + ';\n');
 
