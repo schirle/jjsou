@@ -83,6 +83,7 @@ function titleFromText(text, fallback) {
   for (const line of String(text).split('\n')) {
     const s = line.trim();
     if (!s || s.startsWith('#') || DATE_HEADER_RE.test(s)) continue;
+    if (/^(?:https?:\/\/|magnet:|ed2k:)\S*$/i.test(s)) continue;
     if (/^(类型|分享|网盘|简介|描述|更多资源)[：:]/.test(s)) continue;
     if (/^名称[：:]/.test(s)) return cutTitle(s.replace(/^名称[：:]/, ''));
     return cutTitle(s);
@@ -90,7 +91,35 @@ function titleFromText(text, fallback) {
   return fallback;
 }
 
-return { PAN_LINK_RE, getLinkType, extractPassword, toISO, ZERO_TIME, htmlToText, cutTitle, titleFromText };
+// 相关性判定用的文本归一化：全角转半角 → 小写 → 去 emoji/装饰符 → 只留中英文数字
+function normalizeForMatch(s) {
+  return String(s || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, '')
+    .replace(/[\u2190-\u2BFF\uFE0F\u200B-\u200D]/g, '')
+    .replace(/[^a-z0-9\u3400-\u9FFF]+/g, '');
+}
+
+// 标题与关键词的相关度：0=不相关；4=完全一致；3=包含完整关键词；2=命中空格分词的全部片段
+function keywordScore(title, kw) {
+  const t = normalizeForMatch(title);
+  const q = normalizeForMatch(kw);
+  if (!t || !q) return 0;
+  if (t === q) return 4;
+  if (t.includes(q)) return 3;
+
+  const parts = String(kw || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .split(/[^a-z0-9\u3400-\u9FFF]+/)
+    .map(normalizeForMatch)
+    .filter(Boolean);
+  if (parts.length > 1 && parts.every(p => t.includes(p))) return 2;
+  return 0;
+}
+
+return { PAN_LINK_RE, getLinkType, extractPassword, toISO, ZERO_TIME, htmlToText, cutTitle, titleFromText, normalizeForMatch, keywordScore };
 })();
 
 // ---- functions/_lib/http.js ----
@@ -155,7 +184,39 @@ function extractTextHtml(block) {
   return block.slice(openEnd + 1);
 }
 
-function parseChannelPage(html, channel, kw) {
+// 清理单行文本：去掉链接、提取码、括号噪声，留下可读的资源名
+function cleanLine(s) {
+  return String(s || '')
+    .replace(/(?:https?:\/\/|magnet:|ed2k:)\S+/gi, ' ')
+    .replace(/(?:提取码|访问码|密码|pwd)[：:\s]*[a-zA-Z0-9]{4,8}/gi, ' ')
+    .replace(/[\[\]{}【】()（）<>《》"'`|]+/g, ' ')
+    .replace(/^[^\u4e00-\u9fffA-Za-z0-9]+/, '')
+    .replace(/^名称[：:]\s*/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// 一条 TG 消息常是「合集」：几十个剧名配几十个链接。
+// 用链接所在行（或上方最近的有效行）当该链接的标题，避免所有链接共用消息第一行标题。
+function titleForUrl(url, lines, fallback) {
+  let idx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].includes(url)) { idx = i; break; }
+  }
+  if (idx >= 0) {
+    const own = cleanLine(lines[idx]);
+    if (own.length >= 2) return own;
+    for (let j = idx - 1; j >= 0 && j >= idx - 3; j--) {
+      const c = cleanLine(lines[j]);
+      if (c.length < 2 || c.startsWith('#')) continue;
+      if (/^\d{1,4}[年\-/.]\d{1,2}[月\-/.]\d{1,2}日?$/.test(c)) continue;
+      return c;
+    }
+  }
+  return fallback;
+}
+
+function parseChannelPage(html, channel) {
   const blocks = html.split('tgme_widget_message_wrap').slice(1);
   const results = [];
 
@@ -178,16 +239,23 @@ function parseChannelPage(html, channel, kw) {
     }
     if (urls.size === 0) continue;
 
+    const lines = text.split('\n');
+    const messageTitle = titleFromText(text, '');
     const links = [];
     for (const url of urls) {
-      links.push({ type: getLinkType(url), url, password: extractPassword(url, text) });
+      links.push({
+        type: getLinkType(url),
+        url,
+        password: extractPassword(url, text),
+        title: titleForUrl(url, lines, messageTitle)
+      });
     }
 
     results.push({
       id: `${channel}_${idMatch[1]}`,
       channel,
       datetime: timeMatch[1],
-      title: titleFromText(text, kw),
+      title: messageTitle,
       links
     });
   }
@@ -200,7 +268,7 @@ async function searchChannel(channel, kw, timeoutMs) {
   const html = await fetchText(url, {
     headers: { 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' }
   }, timeoutMs);
-  return parseChannelPage(html, channel, kw);
+  return parseChannelPage(html, channel);
 }
 
 // 并发搜索多个频道，单个频道失败不影响整体
@@ -590,7 +658,8 @@ return { PLUGINS, DEFAULT_PLUGINS };
 // 合并去重后按网盘类型归类输出。无需 Docker / 常驻服务器。
 //
 // 路由：
-//   GET /api/search?kw=关键词[&cloud_types=quark,uc][&src=all|tg|plugin][&channels=a,b][&plugins=a,b][&refresh=1][&debug=1]
+//   GET /api/search?kw=关键词[&cloud_types=quark,uc][&src=all|tg|plugin][&channels=a,b][&plugins=a,b][&refresh=1][&debug=1][&relax=1]
+//   relax=1 关闭关键词相关性过滤（默认只保留标题含关键词的结果）
 //   GET /api/health
 // 出参：{ code, message, data: { total, merged_by_type: { quark: [{url,password,note,datetime}] } } }
 //
@@ -598,7 +667,17 @@ return { PLUGINS, DEFAULT_PLUGINS };
 //   TG_CHANNELS        TG 频道列表（可选，逗号分隔；不配用内置默认）
 //   PLUGINS            启用的插件（可选，逗号分隔；不配用内置全部）
 //   SEARCH_TIMEOUT_MS  单个上游请求超时毫秒（可选，默认 8000）
-//   CACHE_TTL_SECONDS  搜索结果缓存秒数（可选，默认 1800）const { searchTG } = __TG;const { PLUGINS, DEFAULT_PLUGINS } = __PIndex;const { getLinkType, cutTitle, ZERO_TIME } = __R;
+//   CACHE_TTL_SECONDS  搜索结果缓存秒数（可选，默认 1800）const { searchTG } = __TG;const { PLUGINS, DEFAULT_PLUGINS } = __PIndex;const { getLinkType, cutTitle, keywordScore, ZERO_TIME } = __R;
+// 过滤/排序逻辑版本：升级时递增，让旧的 Cloudflare 缓存立即失效
+const CACHE_VERSION = 'rel2';
+
+function cacheKeyOf(request) {
+  const u = new URL(request.url);
+  for (const k of ['refresh', 'debug', '_v']) u.searchParams.delete(k);
+  u.searchParams.set('_v', CACHE_VERSION);
+  return new Request(u.toString(), { method: 'GET' });
+}
+
 // 内置默认 TG 频道（与 pansou 默认配置一致，可用 TG_CHANNELS 变量覆盖）
 const DEFAULT_TG_CHANNELS = [
   'tgsearchers2', 'Aliyun_4K_Movies', 'yunpanx', 'yp123pan', 'yunpanxunlei', 'tianyifc',
@@ -630,15 +709,20 @@ function json(data, status = 200) {
   });
 }
 
-// 合并去重：URL 为唯一键，重复时保留时间更新的；按网盘类型分组
-function mergeByType(resultGroups, wantedTypes) {
+// 合并去重：URL 为唯一键，重复时保留时间更新的；默认剔除标题不含关键词的结果
+function mergeByType(resultGroups, wantedTypes, kw, strict) {
   const byUrl = new Map();
+  let filteredOut = 0;
 
   for (const group of resultGroups) {
     for (const r of group.items) {
-      const title = cutTitle(r.title || '');
+      const groupTitle = cutTitle(r.title || '');
       for (const link of r.links || []) {
         if (!link.url) continue;
+        const title = cutTitle(link.title || groupTitle);
+        const score = keywordScore(title, kw);
+        if (strict && score === 0) { filteredOut += 1; continue; }
+
         const datetime = link.datetime || r.datetime || ZERO_TIME;
         const prev = byUrl.get(link.url);
         if (!prev) {
@@ -647,13 +731,15 @@ function mergeByType(resultGroups, wantedTypes) {
             url: link.url,
             password: link.password || '',
             note: title,
-            datetime
+            datetime,
+            score
           });
         } else {
-          // 更新的记录覆盖时间/提取码，标题取先到的非空值
           if (datetime > prev.datetime) prev.datetime = datetime;
           if (!prev.password && link.password) prev.password = link.password;
-          if (!prev.note && title) prev.note = title;
+          // 同一链接来自多个源时，优先保留与关键词更匹配的标题
+          if (score > prev.score) { prev.score = score; if (title) prev.note = title; }
+          else if (!prev.note && title) prev.note = title;
         }
       }
     }
@@ -664,7 +750,7 @@ function mergeByType(resultGroups, wantedTypes) {
   for (const e of byUrl.values()) {
     if (wantedTypes && !wantedTypes.has(e.type)) continue;
     (merged[e.type] || (merged[e.type] = [])).push({
-      url: e.url, password: e.password, note: e.note, datetime: e.datetime
+      url: e.url, password: e.password, note: e.note, datetime: e.datetime, score: e.score
     });
     total += 1;
   }
@@ -673,9 +759,13 @@ function mergeByType(resultGroups, wantedTypes) {
   const order = ['baidu', 'aliyun', 'quark', 'tianyi', 'uc', 'mobile', '115', 'xunlei', '123', 'pikpak', 'magnet', 'ed2k', 'guangya', 'others'];
   const merged_by_type = {};
   for (const t of order) {
-    if (merged[t]?.length) merged_by_type[t] = merged[t];
+    if (merged[t]?.length) {
+      merged_by_type[t] = merged[t]
+        .sort((a, b) => (b.score - a.score) || String(b.datetime).localeCompare(String(a.datetime)))
+        .map(({ score, ...rest }) => rest);
+    }
   }
-  return { total, merged_by_type };
+  return { total, merged_by_type, filteredOut };
 }
 
 export default {
@@ -717,12 +807,13 @@ export default {
     const kw = (sp.get('kw') || sp.get('word') || '').trim();
     if (!kw) return json({ code: 400, message: '缺少 kw 参数', data: null }, 400);
 
-    // 缓存（refresh=1 跳过读取；debug 响应不缓存；本地 node 无 caches，自动降级）
+    // 缓存（refresh=1 跳过读取并回写主 key；debug 不参与缓存；本地 node 无 caches 自动降级）
     const cache = globalThis.caches?.default;
-    const refresh = ['1', 'true'].includes(sp.get('refresh'));
+    const cacheKey = cache ? cacheKeyOf(request) : null;
+    const refresh = ['1', 'true'].includes(String(sp.get('refresh') || '').toLowerCase());
     const debug = sp.get('debug') === '1';
     if (cache && !refresh && !debug) {
-      const hit = await cache.match(request);
+      const hit = await cache.match(cacheKey);
       if (hit) return hit;
     }
 
@@ -767,17 +858,21 @@ export default {
     const requestedTypes = parseList(sp.get('cloud_types')).map(s => s.toLowerCase());
     const wantedTypes = requestedTypes.length ? new Set(requestedTypes) : null;
 
-    const { total, merged_by_type } = mergeByType(groups, wantedTypes);
+    // 默认严格模式：只保留标题与关键词相关的结果，relax=1 可查看全部原始结果
+    const strict = !['1', 'true'].includes(String(sp.get('relax') || '').toLowerCase());
+    const { total, merged_by_type, filteredOut } = mergeByType(groups, wantedTypes, kw, strict);
 
     const data = { total, merged_by_type };
     if (debug) {
       data.took_ms = Date.now() - startedAt;
       data.sources = stats;
+      data.strict = strict;
+      data.filtered_out = filteredOut;
     }
 
     const resp = json({ code: 0, message: 'success', data });
     resp.headers.set('Cache-Control', 'public, max-age=' + Math.min(Math.max(Number(env.CACHE_TTL_SECONDS) || 1800, 60), 86400));
-    if (cache) ctx?.waitUntil(cache.put(request, resp.clone()));
+    if (cache && !debug) ctx?.waitUntil(cache.put(cacheKey, resp.clone()));
     return resp;
   }
 };
