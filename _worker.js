@@ -105,10 +105,12 @@ function isGoodTitle(s) {
   if (/^\d{1,4}[年\-/.]\d{1,2}[月\-/.]\d{1,2}日?$/.test(t)) return false;
   // 剧情简介、演员表等元数据行不是标题
   if (/^(?:描述|简介|剧情|梗概|演员|导演|备注|说明|标签|分类|地区|年份|集数|更新|状态)[：:]/.test(t)) return false;
-  // 去掉盘名标签与标点后没有实质内容，同样不算标题
+  // 剥掉 emoji、盘名/导航按钮文案、标点后若没有实质内容，
+  // 说明这是「下载地址👇」「光鸭云盘：」「夸克网盘 🔆 百度网盘」这类模板文本
   const stripped = t
-    .replace(/(?:阿里|夸克|百度|UC|迅雷|天翼|123|115|移动|网盘|链接|地址|名称|资源)[云盘网盘]*[：:]?/gi, '')
-    .replace(/[：:\s\-|·]+/g, '')
+    .replace(/[\u{1F000}-\u{1FAFF}\u2190-\u2BFF\u2600-\u27BF\uFE0F\u200B-\u200D]/gu, '')
+    .replace(/(?:阿里云|阿里|夸克|百度|UC|迅雷|天翼|123|115|移动|PikPak|光鸭|网盘|云盘|资源|下载|点击|立即|复制|保存|转存|提取|查看|更多|长按|扫码|获取|打开|访问|链接|地址|名称|标题|这里|此处|点我|密码|提取码|pwd|code)[云盘网盘]*/gi, '')
+    .replace(/[：:\s\-|·、,，.。!！?？\[\]【】()（）<>《》"'`+#*~～\/\\]+/g, '')
     .trim();
   return stripped.length >= 2;
 }
@@ -845,7 +847,7 @@ return { PLUGINS, DEFAULT_PLUGINS };
 //   SEARCH_TIMEOUT_MS  单个上游请求超时毫秒（可选，默认 8000）
 //   CACHE_TTL_SECONDS  搜索结果缓存秒数（可选，默认 1800）const { searchTG } = __TG;const { PLUGINS, DEFAULT_PLUGINS } = __PIndex;const { getLinkType, cutTitle, keywordScore, ZERO_TIME } = __R;
 // 过滤/排序逻辑版本：升级时递增，让旧的 Cloudflare 缓存立即失效
-const CACHE_VERSION = 'rel6';
+const CACHE_VERSION = 'rel7';
 
 function cacheKeyOf(request) {
   const u = new URL(request.url);
