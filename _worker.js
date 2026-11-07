@@ -206,7 +206,8 @@ function titleForUrl(url, lines, fallback) {
   if (idx >= 0) {
     const own = cleanLine(lines[idx]);
     if (own.length >= 2) return own;
-    for (let j = idx - 1; j >= 0 && j >= idx - 3; j--) {
+    // 分集资源常是「一个标题 + 多行链接」，扩大回溯范围让每个链接都能继承标题
+    for (let j = idx - 1; j >= 0 && j >= idx - 8; j--) {
       const c = cleanLine(lines[j]);
       if (c.length < 2 || c.startsWith('#')) continue;
       if (/^\d{1,4}[年\-/.]\d{1,2}[月\-/.]\d{1,2}日?$/.test(c)) continue;
@@ -635,19 +636,160 @@ function toIsoOrZero(s) {
 return { search };
 })();
 
+// ---- functions/_lib/plugins/quarkres.js ----
+const __P_quarkres = (() => {
+// 热门夸克资源：单请求 JSON 接口
+// 移植自 fish2018/pansou（MIT）plugin/quarkresconst { fetchJSON } = __H;const { getLinkType, ZERO_TIME } = __R;
+async function search(kw, { timeoutMs }) {
+  const res = await fetchJSON(
+    'https://squark.cc.cd/api/search?kw=' + encodeURIComponent(kw),
+    { headers: { 'Accept': 'application/json, text/plain, */*', 'Referer': 'https://squark.cc.cd/' } },
+    timeoutMs
+  );
+  if (res.code !== 200 || !Array.isArray(res.data)) return [];
+
+  const out = [];
+  for (const it of res.data) {
+    const links = [];
+    for (const l of it.links || []) {
+      const url = String(l.url || '').replace(/&amp;/g, '&').trim();
+      const type = getLinkType(url);
+      if (!url || type === 'others') continue;
+      links.push({ type, url, password: String(l.password || '') });
+    }
+    if (!links.length) continue;
+    out.push({
+      id: 'quarkres-' + (it.unique_id || it.title),
+      title: String(it.title || ''),
+      datetime: String(it.datetime || '') || ZERO_TIME,
+      links
+    });
+  }
+  return out;
+}
+
+return { search };
+})();
+
+// ---- functions/_lib/plugins/yunsou.js ----
+const __P_yunsou = (() => {
+// 云搜 wpys.cc：单请求 HTML，结果在 copyText(事件, 标题, 链接, 提取码) 里
+// 移植自 fish2018/pansou（MIT）plugin/yunsou（只取第一页，控制子请求数）const { fetchText } = __H;const { getLinkType, htmlToText, ZERO_TIME } = __R;
+const COPY_RE = /copyText\([^,]*,\s*'([^']*)',\s*'([^']*)',\s*'([^']*)'\)/g;
+
+async function search(kw, { timeoutMs }) {
+  const html = await fetchText(
+    'https://wpys.cc/s/' + encodeURIComponent(kw) + '.html',
+    { headers: { 'Accept': 'text/html,application/xhtml+xml', 'Referer': 'https://wpys.cc/' } },
+    timeoutMs
+  );
+
+  const out = [];
+  const seen = new Set();
+  for (const m of html.matchAll(COPY_RE)) {
+    const url = String(m[2] || '').replace(/&amp;/g, '&').trim();
+    const type = getLinkType(url);
+    if (!url || type === 'others' || seen.has(url)) continue;
+    seen.add(url);
+    out.push({
+      id: 'yunsou-' + url,
+      title: htmlToText(m[1] || ''),
+      datetime: ZERO_TIME,
+      links: [{ type, url, password: String(m[3] || '').trim() }]
+    });
+  }
+  return out;
+}
+
+return { search };
+})();
+
+// ---- functions/_lib/plugins/haitunsou.js ----
+const __P_haitunsou = (() => {
+// 海豚搜：单请求 HTML，结果内嵌在 JSON.parse('...') 里
+// 移植自 fish2018/pansou（MIT）plugin/haitunsouconst { fetchText } = __H;const { getLinkType, htmlToText, toISO, ZERO_TIME } = __R;
+// 解码 JS 单引号字符串里的转义（\xNN / \uNNNN / \\ / \" 等）
+function decodeJsString(s) {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== '\\') { out += s[i]; continue; }
+    const n = s[++i];
+    if (n === 'x') { out += String.fromCharCode(parseInt(s.slice(i + 1, i + 3), 16)); i += 2; }
+    else if (n === 'u') { out += String.fromCharCode(parseInt(s.slice(i + 1, i + 5), 16)); i += 4; }
+    else if (n === 'n') out += '\n';
+    else if (n === 'r') out += '\r';
+    else if (n === 't') out += '\t';
+    else if (n === 'b') out += '\b';
+    else if (n === 'f') out += '\f';
+    else if (n === 'v') out += '\v';
+    else if (n === '0') out += '\0';
+    else out += n;
+  }
+  return out;
+}
+
+function extractList(html) {
+  const m = String(html).match(/(?:const|let|var)\s+list\w*\s*=\s*JSON\.parse\('([\s\S]*?)'\s*\)/);
+  if (!m) return [];
+  try {
+    const arr = JSON.parse(decodeJsString(m[1]));
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+async function search(kw, { timeoutMs }) {
+  const html = await fetchText(
+    'https://www.haitunsou.com/s/' + encodeURIComponent(kw) + '.html',
+    { headers: { 'Accept': 'text/html', 'Cache-Control': 'no-cache', 'Referer': 'https://www.haitunsou.com/' } },
+    timeoutMs
+  );
+
+  const out = [];
+  const seen = new Set();
+  for (const it of extractList(html)) {
+    if (it.is_delete && Number(it.is_delete) !== 0) continue;
+    if (it.status != null && Number(it.status) < 0) continue;
+    const url = String(it.url || '').replace(/&amp;/g, '&').trim();
+    const type = getLinkType(url);
+    if (!url || type === 'others' || seen.has(url)) continue;
+    seen.add(url);
+
+    const pwd = String(it.code || '') ||
+      (url.match(/[?&](?:pwd|password|passcode|code)=([a-zA-Z0-9]{4,8})/i) || [])[1] || '';
+    const dt = String(it.times || '');
+    out.push({
+      id: 'haitunsou-' + (it.id || url),
+      title: htmlToText(String(it.title || it.name || '')),
+      datetime: dt ? (dt.length === 10 ? dt + 'T00:00:00Z' : toISO(dt)) : ZERO_TIME,
+      links: [{ type, url, password: pwd }]
+    });
+  }
+  return out;
+}
+
+return { search };
+})();
+
 // ---- functions/_lib/plugins/index.js ----
 const __PIndex = (() => {
-// 插件注册表：name -> search(kw, {timeoutMs}) => [{id,title,datetime,links:[{type,url,password}]}]const hunhepan = __P_hunhepan;const jikepan = __P_jikepan;const qupansou = __P_qupansou;const pansearch = __P_pansearch;const pan666 = __P_pan666;const ouge = __P_ouge;
+// 插件注册表：name -> search(kw, {timeoutMs}) => [{id,title,datetime,links:[{type,url,password}]}]const hunhepan = __P_hunhepan;const jikepan = __P_jikepan;const qupansou = __P_qupansou;const pansearch = __P_pansearch;const pan666 = __P_pan666;const ouge = __P_ouge;const quarkres = __P_quarkres;const yunsou = __P_yunsou;const haitunsou = __P_haitunsou;
 const PLUGINS = {
   hunhepan,
   jikepan,
   qupansou,
   pansearch,
   pan666,
-  ouge
+  ouge,
+  quarkres,
+  yunsou,
+  haitunsou
 };
 
-const DEFAULT_PLUGINS = Object.keys(PLUGINS);
+// 默认只启用 2026-11 实测可用的源；其余保留在注册表，
+// 可用 plugins= 参数或 PLUGINS 环境变量随时启用
+const DEFAULT_PLUGINS = ['quarkres', 'yunsou', 'haitunsou'];
 
 return { PLUGINS, DEFAULT_PLUGINS };
 })();
@@ -658,8 +800,8 @@ return { PLUGINS, DEFAULT_PLUGINS };
 // 合并去重后按网盘类型归类输出。无需 Docker / 常驻服务器。
 //
 // 路由：
-//   GET /api/search?kw=关键词[&cloud_types=quark,uc][&src=all|tg|plugin][&channels=a,b][&plugins=a,b][&refresh=1][&debug=1][&relax=1]
-//   relax=1 关闭关键词相关性过滤（默认只保留标题含关键词的结果）
+//   GET /api/search?kw=关键词[&cloud_types=quark,uc][&src=all|tg|plugin][&channels=a,b][&plugins=a,b][&strict=1][&relax=1][&refresh=1][&debug=1]
+//   默认 smart：不减少数量，标题含关键词的结果排最前；strict=1 只留精确匹配；relax=1 完全原始顺序
 //   GET /api/health
 // 出参：{ code, message, data: { total, merged_by_type: { quark: [{url,password,note,datetime}] } } }
 //
@@ -669,7 +811,7 @@ return { PLUGINS, DEFAULT_PLUGINS };
 //   SEARCH_TIMEOUT_MS  单个上游请求超时毫秒（可选，默认 8000）
 //   CACHE_TTL_SECONDS  搜索结果缓存秒数（可选，默认 1800）const { searchTG } = __TG;const { PLUGINS, DEFAULT_PLUGINS } = __PIndex;const { getLinkType, cutTitle, keywordScore, ZERO_TIME } = __R;
 // 过滤/排序逻辑版本：升级时递增，让旧的 Cloudflare 缓存立即失效
-const CACHE_VERSION = 'rel2';
+const CACHE_VERSION = 'rel4';
 
 function cacheKeyOf(request) {
   const u = new URL(request.url);
@@ -678,20 +820,64 @@ function cacheKeyOf(request) {
   return new Request(u.toString(), { method: 'GET' });
 }
 
-// 内置默认 TG 频道（与 pansou 默认配置一致，可用 TG_CHANNELS 变量覆盖）
-const DEFAULT_TG_CHANNELS = [
+// 内置 TG 频道池：原有已验证频道 + fish2018/pansou 官方推荐频道（去重）
+// 可用 TG_CHANNELS 环境变量或 channels= 参数覆盖
+const TG_CHANNEL_POOL = [
   'tgsearchers2', 'Aliyun_4K_Movies', 'yunpanx', 'yp123pan', 'yunpanxunlei', 'tianyifc',
-  'BaiduCloudDisk', 'txtyzy', 'peccxinpd', 'gotopan', 'PanjClub', 'kkxlzy', 'baicaoZY',
-  'MCPH01', 'bdwpzhpd', 'ysxb48', 'yggpan', 'MCPH086', 'zaihuayun', 'Q66Share',
-  'Oscar_4Kmovies', 'ucwpzy', 'shareAliyun', 'alyp_1', 'dianyingshare', 'Quark_Movies',
-  'XiangxiuNBB', 'ydypzyfx', 'ucquark', 'xx123pan', 'zyfb123', 'tyypzhpd', 'tianyirigeng',
-  'cloudtianyi', 'hdhhd21', 'Lsp115', 'oneonefivewpfx', 'qixingzhenren', 'taoxgzy',
-  'Channel_Shares_115', 'vip115hot', 'yunpan139', 'yunpan189', 'yunpanuc', 'leoziyuan',
-  'pikpakpan', 'Q_dongman'
+  'BaiduCloudDisk', 'txtyzy', 'peccxinpd', 'gotopan', 'PanjClub', 'kkxlzy',
+  'baicaoZY', 'MCPH01', 'bdwpzhpd', 'ysxb48', 'yggpan', 'MCPH086',
+  'zaihuayun', 'Q66Share', 'Oscar_4Kmovies', 'ucwpzy', 'shareAliyun', 'alyp_1',
+  'dianyingshare', 'Quark_Movies', 'XiangxiuNBB', 'ydypzyfx', 'ucquark', 'xx123pan',
+  'zyfb123', 'tyypzhpd', 'tianyirigeng', 'cloudtianyi', 'hdhhd21', 'Lsp115',
+  'oneonefivewpfx', 'qixingzhenren', 'taoxgzy', 'Channel_Shares_115', 'vip115hot', 'yunpan139',
+  'yunpan189', 'yunpanuc', 'leoziyuan', 'pikpakpan', 'Q_dongman', 'tgsearchers7',
+  'MCPH02', 'MCPH03', 'yingshifenxiang123', 'wp123zy', 'yydf_hzl', 'yoyokuakeduanju',
+  'TG654TG', 'QukanMovie', 'yeqingjie_GJG666', 'movielover8888_film3', 'Baidu_netdisk', 'D_wusun',
+  'FLMdongtianfudi', 'KaiPanshare', 'rjyxfx', 'PikPak_Share_Channel', 'newproductsourcing', 'QuarkFree',
+  'yunpanNB', 'kkdj001', 'xxzlzn', 'pxyunpanxunlei', 'jxwpzy', 'kuakedongman',
+  'xiangnikanj', 'solidsexydoll', 'guoman4K', 'zdqxm', 'kduanju', 'cilidianying',
+  'CBduanju', 'SharePanFilms', 'dzsgx', 'BooksRealm', 'douerpan', 'Netdisk_Movies',
+  'yunpanquark', 'ciliziyuanku', 'jzmm_123pan', 'wpan8', 'mqte5', 'regengguangya',
+  'regeng115', 'regeng123', 'yy80986098', 'pan_guangya', 'guangyapan_episode', 'guangya_hdhive',
+  'guangyapindao', 'quark_res', 'domgmingapk', 'dianying4k', 'tgbokee', 'ucshare',
+  'gokuapan', 'WFYSFX03', 'gimy100', 'gimy115iso', 'fcij5', 'xvth5',
+  'xuexiziliaobaibaoku', 'phzvip', 'jdbigdiscount', 'youxigs', 'zhoulanziyuan', 'seedhub_pro',
+  'jnjy_5', 'xxziliao', 'wpzyk', 'ruanjianfenxiang77', 'jpnd5', 'XunLeiPinDao',
+  'a123fxme', 'WPpindao', 'kuyupan', 'djya5', 'zh_vip', 'gdsharing',
+  'guangyaya2026', 'alyp_17362', 'baidyunpan', 'yunpans', 'rbzhwpzy', 'Panzi88com'
 ];
 
-// Workers 免费版单请求最多 50 个子请求，频道数需给插件留余量
-const MAX_CHANNELS = 32;
+// Workers 免费版单请求最多 50 个子请求，留 2 个余量；插件按实际 fetch 次数扣预算
+const SUBREQUEST_LIMIT = 50;
+const SUBREQUEST_RESERVE = 2;
+const PLUGIN_FETCH_COST = { hunhepan: 2, pansearch: 3, pan666: 2 };
+const CORE_CHANNEL_COUNT = 28;
+
+function channelBudget(pluginNames, src) {
+  if (src === 'plugin') return 0;
+  const cost = src === 'tg' ? 0 : pluginNames.reduce((n, p) => n + (PLUGIN_FETCH_COST[p] || 1), 0);
+  return Math.max(0, SUBREQUEST_LIMIT - SUBREQUEST_RESERVE - cost);
+}
+
+function hashString(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+// 核心频道固定查询，其余按关键词哈希从池里轮换（同一关键词结果稳定、可缓存）
+function pickChannels(kw, budget, explicit) {
+  if (budget <= 0) return [];
+  if (explicit && explicit.length) return explicit.slice(0, budget);
+  const core = TG_CHANNEL_POOL.slice(0, Math.min(CORE_CHANNEL_COUNT, budget));
+  const pool = TG_CHANNEL_POOL.slice(CORE_CHANNEL_COUNT);
+  const rest = budget - core.length;
+  if (rest <= 0 || !pool.length) return core;
+  const start = hashString(kw) % pool.length;
+  const picked = [];
+  for (let i = 0; i < Math.min(rest, pool.length); i++) picked.push(pool[(start + i) % pool.length]);
+  return core.concat(picked);
+}
 
 function parseList(v) {
   return String(v || '').split(/[\s,，;；]+/).map(s => s.trim()).filter(Boolean);
@@ -709,8 +895,9 @@ function json(data, status = 200) {
   });
 }
 
-// 合并去重：URL 为唯一键，重复时保留时间更新的；默认剔除标题不含关键词的结果
-function mergeByType(resultGroups, wantedTypes, kw, strict) {
+// 合并去重：URL 为唯一键，重复时保留时间更新的；
+// smart（默认）不减少数量，只把标题含关键词的结果排最前；strict 只留精确匹配；all 保持原始顺序
+function mergeByType(resultGroups, wantedTypes, kw, mode) {
   const byUrl = new Map();
   let filteredOut = 0;
 
@@ -721,7 +908,7 @@ function mergeByType(resultGroups, wantedTypes, kw, strict) {
         if (!link.url) continue;
         const title = cutTitle(link.title || groupTitle);
         const score = keywordScore(title, kw);
-        if (strict && score === 0) { filteredOut += 1; continue; }
+        if (mode === 'strict' && score === 0) { filteredOut += 1; continue; }
 
         const datetime = link.datetime || r.datetime || ZERO_TIME;
         const prev = byUrl.get(link.url);
@@ -747,7 +934,9 @@ function mergeByType(resultGroups, wantedTypes, kw, strict) {
 
   const merged = {};
   let total = 0;
+  let matched = 0;
   for (const e of byUrl.values()) {
+    if (e.score > 0) matched += 1;
     if (wantedTypes && !wantedTypes.has(e.type)) continue;
     (merged[e.type] || (merged[e.type] = [])).push({
       url: e.url, password: e.password, note: e.note, datetime: e.datetime, score: e.score
@@ -760,12 +949,13 @@ function mergeByType(resultGroups, wantedTypes, kw, strict) {
   const merged_by_type = {};
   for (const t of order) {
     if (merged[t]?.length) {
-      merged_by_type[t] = merged[t]
-        .sort((a, b) => (b.score - a.score) || String(b.datetime).localeCompare(String(a.datetime)))
-        .map(({ score, ...rest }) => rest);
+      if (mode !== 'all') {
+        merged[t].sort((a, b) => (b.score - a.score) || String(b.datetime).localeCompare(String(a.datetime)));
+      }
+      merged_by_type[t] = merged[t].map(({ score, ...rest }) => rest);
     }
   }
-  return { total, merged_by_type, filteredOut };
+  return { total, merged_by_type, matched, filteredOut };
 }
 
 export default {
@@ -785,7 +975,9 @@ export default {
         code: 0, message: 'success',
         data: {
           plugins: plugins.length ? plugins : DEFAULT_PLUGINS,
-          channels: parseList(env.TG_CHANNELS).length || DEFAULT_TG_CHANNELS.length
+          available_plugins: Object.keys(PLUGINS),
+          channels: TG_CHANNEL_POOL.length,
+          channel_budget: channelBudget(plugins.length ? plugins : DEFAULT_PLUGINS, 'all')
         }
       });
     }
@@ -820,10 +1012,14 @@ export default {
     const src = sp.get('src') || 'all';
     const timeoutMs = Math.min(Math.max(Number(env.SEARCH_TIMEOUT_MS) || 8000, 2000), 25000);
 
-    // 频道与插件清单
-    const channels = (sp.get('channels') ? parseList(sp.get('channels')) : (parseList(env.TG_CHANNELS).length ? parseList(env.TG_CHANNELS) : DEFAULT_TG_CHANNELS)).slice(0, MAX_CHANNELS);
+    // 插件清单；频道数按剩余子请求预算动态分配
     const pluginNames = (sp.get('plugins') ? parseList(sp.get('plugins')) : (parseList(env.PLUGINS).length ? parseList(env.PLUGINS) : DEFAULT_PLUGINS))
       .filter(p => PLUGINS[p]);
+    const budget = channelBudget(pluginNames, src);
+    const channelsArg = sp.get('channels');
+    const envChannels = parseList(env.TG_CHANNELS);
+    const explicitChannels = channelsArg ? parseList(channelsArg) : (envChannels.length ? envChannels : null);
+    const channels = pickChannels(kw, budget, explicitChannels);
 
     // 并发搜索：TG 一路 + 各插件一路，全部并行，单路失败不影响整体
     // TG 频道单独用更短的超时（t.me 正常响应很快，挂住的多为被墙/限流）
@@ -858,16 +1054,21 @@ export default {
     const requestedTypes = parseList(sp.get('cloud_types')).map(s => s.toLowerCase());
     const wantedTypes = requestedTypes.length ? new Set(requestedTypes) : null;
 
-    // 默认严格模式：只保留标题与关键词相关的结果，relax=1 可查看全部原始结果
-    const strict = !['1', 'true'].includes(String(sp.get('relax') || '').toLowerCase());
-    const { total, merged_by_type, filteredOut } = mergeByType(groups, wantedTypes, kw, strict);
+    // smart（默认）：结果全保留，精确匹配排最前；strict=1 只留精确匹配；relax=1 保持原始顺序
+    const mode = ['1', 'true'].includes(String(sp.get('strict') || '').toLowerCase()) ? 'strict'
+      : ['1', 'true'].includes(String(sp.get('relax') || '').toLowerCase()) ? 'all'
+      : 'smart';
+    const { total, merged_by_type, matched, filteredOut } = mergeByType(groups, wantedTypes, kw, mode);
 
     const data = { total, merged_by_type };
     if (debug) {
       data.took_ms = Date.now() - startedAt;
       data.sources = stats;
-      data.strict = strict;
+      data.mode = mode;
+      data.matched = matched;
       data.filtered_out = filteredOut;
+      data.channels_used = channels.length;
+      data.channel_budget = budget;
     }
 
     const resp = json({ code: 0, message: 'success', data });
