@@ -79,14 +79,33 @@ function cutTitle(title) {
 // 从消息正文里取标题（跳过 #标签行、日期头、元数据行）
 const DATE_HEADER_RE = /^📅?\s*\d{1,4}(?:年\d{1,2}月\d{1,2}日|[-/.]\d{1,2}[-/.]\d{1,2})$|^📅?\s*\d{1,2}月\d{1,2}日$/;
 
+// 只有网盘类型/字段名的行不是标题，例如「阿里：」「夸克：」「链接：」
+const DISK_LABEL_ONLY_RE = /^(?:阿里(?:云|云盘|网盘)?|夸克(?:网盘|云盘)?|百度(?:网盘|云盘)?|uc(?:网盘|云盘)?|迅雷(?:网盘|云盘)?|天翼(?:云盘)?|123(?:网盘|云盘|pan)?|115(?:网盘)?|移动(?:云盘|网盘)?|pikpak|光鸭(?:网盘)?|网盘|类型|分享|链接|地址|名称|资源|提取码|密码|pwd|code)[：:]?$/i;
+
+function isGoodTitle(s) {
+  const t = String(s || '').trim();
+  if (t.length < 2) return false;
+  if (/^#/.test(t)) return false;
+  if (DISK_LABEL_ONLY_RE.test(t)) return false;
+  if (/^(?:https?:\/\/|magnet:|ed2k:)/i.test(t)) return false;
+  if (/^\d{1,4}[年\-/.]\d{1,2}[月\-/.]\d{1,2}日?$/.test(t)) return false;
+  // 去掉盘名标签与标点后没有实质内容，同样不算标题
+  const stripped = t
+    .replace(/(?:阿里|夸克|百度|UC|迅雷|天翼|123|115|移动|网盘|链接|地址|名称|资源)[云盘网盘]*[：:]?/gi, '')
+    .replace(/[：:\s\-|·]+/g, '')
+    .trim();
+  return stripped.length >= 2;
+}
+
 function titleFromText(text, fallback) {
   for (const line of String(text).split('\n')) {
     const s = line.trim();
     if (!s || s.startsWith('#') || DATE_HEADER_RE.test(s)) continue;
-    if (/^(?:https?:\/\/|magnet:|ed2k:)\S*$/i.test(s)) continue;
     if (/^(类型|分享|网盘|简介|描述|更多资源)[：:]/.test(s)) continue;
-    if (/^名称[：:]/.test(s)) return cutTitle(s.replace(/^名称[：:]/, ''));
-    return cutTitle(s);
+    // 行内链接先去掉，避免「阿里：https://...」被当成标题
+    const cleaned = s.replace(/(?:https?:\/\/|magnet:|ed2k:)\S+/gi, ' ').trim();
+    const t = cutTitle(cleaned.replace(/^名称[：:]\s*/, ''));
+    if (isGoodTitle(t)) return t;
   }
   return fallback;
 }
@@ -119,7 +138,7 @@ function keywordScore(title, kw) {
   return 0;
 }
 
-return { PAN_LINK_RE, getLinkType, extractPassword, toISO, ZERO_TIME, htmlToText, cutTitle, titleFromText, normalizeForMatch, keywordScore };
+return { PAN_LINK_RE, getLinkType, extractPassword, toISO, ZERO_TIME, htmlToText, cutTitle, isGoodTitle, titleFromText, normalizeForMatch, keywordScore };
 })();
 
 // ---- functions/_lib/http.js ----
@@ -157,7 +176,7 @@ return { BROWSER_UA, fetchWithTimeout, fetchText, fetchJSON };
 // ---- functions/_lib/tg.js ----
 const __TG = (() => {
 // TG 频道搜索：抓取 https://t.me/s/{channel}?q={kw} 网页版并解析
-// 解析逻辑移植自 fish2018/pansou（MIT）util/parser_util.goconst { fetchText } = __H;const { PAN_LINK_RE, getLinkType, extractPassword, htmlToText, titleFromText } = __R;
+// 解析逻辑移植自 fish2018/pansou（MIT）util/parser_util.goconst { fetchText } = __H;const { PAN_LINK_RE, getLinkType, extractPassword, htmlToText, titleFromText, isGoodTitle } = __R;
 // 提取消息正文 HTML（平衡 <div> 嵌套）
 function extractTextHtml(block) {
   const at = block.indexOf('tgme_widget_message_text');
@@ -184,7 +203,7 @@ function extractTextHtml(block) {
   return block.slice(openEnd + 1);
 }
 
-// 清理单行文本：去掉链接、提取码、括号噪声，留下可读的资源名
+// 清理单行文本：去掉链接、提取码、括号噪声与行尾盘名标签，留下可读的资源名
 function cleanLine(s) {
   return String(s || '')
     .replace(/(?:https?:\/\/|magnet:|ed2k:)\S+/gi, ' ')
@@ -192,6 +211,7 @@ function cleanLine(s) {
     .replace(/[\[\]{}【】()（）<>《》"'`|]+/g, ' ')
     .replace(/^[^\u4e00-\u9fffA-Za-z0-9]+/, '')
     .replace(/^名称[：:]\s*/, '')
+    .replace(/(?:阿里|夸克|百度|UC|迅雷|天翼|123|115|移动|网盘)\s*[：:]\s*$/i, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -205,13 +225,11 @@ function titleForUrl(url, lines, fallback) {
   }
   if (idx >= 0) {
     const own = cleanLine(lines[idx]);
-    if (own.length >= 2) return own;
-    // 分集资源常是「一个标题 + 多行链接」，扩大回溯范围让每个链接都能继承标题
+    if (isGoodTitle(own)) return own;
+    // 「阿里：链接」这类行只有盘名，继续向上找真正的资源名（分集可连续 8 行链接）
     for (let j = idx - 1; j >= 0 && j >= idx - 8; j--) {
       const c = cleanLine(lines[j]);
-      if (c.length < 2 || c.startsWith('#')) continue;
-      if (/^\d{1,4}[年\-/.]\d{1,2}[月\-/.]\d{1,2}日?$/.test(c)) continue;
-      return c;
+      if (isGoodTitle(c)) return c;
     }
   }
   return fallback;
@@ -811,7 +829,7 @@ return { PLUGINS, DEFAULT_PLUGINS };
 //   SEARCH_TIMEOUT_MS  单个上游请求超时毫秒（可选，默认 8000）
 //   CACHE_TTL_SECONDS  搜索结果缓存秒数（可选，默认 1800）const { searchTG } = __TG;const { PLUGINS, DEFAULT_PLUGINS } = __PIndex;const { getLinkType, cutTitle, keywordScore, ZERO_TIME } = __R;
 // 过滤/排序逻辑版本：升级时递增，让旧的 Cloudflare 缓存立即失效
-const CACHE_VERSION = 'rel4';
+const CACHE_VERSION = 'rel5';
 
 function cacheKeyOf(request) {
   const u = new URL(request.url);
@@ -900,32 +918,42 @@ function json(data, status = 200) {
 function mergeByType(resultGroups, wantedTypes, kw, mode) {
   const byUrl = new Map();
   let filteredOut = 0;
+  const DISK_LABEL = {
+    quark: '夸克', baidu: '百度', uc: 'UC', aliyun: '阿里', tianyi: '天翼',
+    xunlei: '迅雷', '123': '123', '115': '115', mobile: '移动', pikpak: 'PikPak',
+    guangya: '光鸭', magnet: '磁力', ed2k: '电驴'
+  };
 
   for (const group of resultGroups) {
     for (const r of group.items) {
       const groupTitle = cutTitle(r.title || '');
       for (const link of r.links || []) {
         if (!link.url) continue;
-        const title = cutTitle(link.title || groupTitle);
-        const score = keywordScore(title, kw);
+        const rawTitle = cutTitle(link.title || groupTitle);
+        const score = keywordScore(rawTitle, kw);
+        // 消息里确实没有资源名时，用「网盘 · 关键词」兜底，避免空白 note
+        const type = link.type || getLinkType(link.url);
+        const title = rawTitle || ((DISK_LABEL[type] || '网盘') + ' · ' + kw);
         if (mode === 'strict' && score === 0) { filteredOut += 1; continue; }
 
         const datetime = link.datetime || r.datetime || ZERO_TIME;
         const prev = byUrl.get(link.url);
         if (!prev) {
           byUrl.set(link.url, {
-            type: link.type || getLinkType(link.url),
+            type,
             url: link.url,
             password: link.password || '',
             note: title,
+            hasTitle: !!rawTitle,
             datetime,
             score
           });
         } else {
           if (datetime > prev.datetime) prev.datetime = datetime;
           if (!prev.password && link.password) prev.password = link.password;
-          // 同一链接来自多个源时，优先保留与关键词更匹配的标题
-          if (score > prev.score) { prev.score = score; if (title) prev.note = title; }
+          // 同一链接来自多个源时，优先保留真实标题，其次保留与关键词更匹配的标题
+          if (!prev.hasTitle && rawTitle) { prev.note = rawTitle; prev.hasTitle = true; }
+          if (score > prev.score) { prev.score = score; if (rawTitle) prev.note = rawTitle; }
           else if (!prev.note && title) prev.note = title;
         }
       }
