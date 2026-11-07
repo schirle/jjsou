@@ -53,27 +53,41 @@ function toISO(s) {
 
 const ZERO_TIME = '0001-01-01T00:00:00Z';
 
-// HTML 转纯文本（<br> 转换行）
+// HTML 转纯文本（<br> 转换行），完整解码命名/数字实体
 function htmlToText(html) {
   return String(html || '')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(p|div)>/gi, '\n')
     .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#0?39;/g, "'")
+    .replace(/&nbsp;|&#0?160;|&#x0?a0;/gi, ' ')
+    .replace(/&amp;|&#0?38;|&#x0?26;/gi, '&')
+    .replace(/&lt;|&#0?60;|&#x0?3c;/gi, '<')
+    .replace(/&gt;|&#0?62;|&#x0?3e;/gi, '>')
+    .replace(/&quot;|&#0?34;|&#x0?22;/gi, '"')
+    .replace(/&apos;|&#0?39;|&#x0?27;/g, "'")
+    .replace(/&(?:lrm|rlm|zwj|zwnj|shy|ensp|emsp|thinsp);/gi, '')
+    .replace(/&hellip;|&#0?8230;|&#x2026;/gi, '…')
+    .replace(/&mdash;|&#0?8212;|&ndash;|&#0?8211;/gi, '—')
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => {
+      const n = parseInt(h, 16);
+      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : '';
+    })
+    .replace(/&#(\d+);/g, (_, d) => {
+      const n = Number(d);
+      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : '';
+    })
     .replace(/[ \t]+/gm, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
-// 标题截断：在 简介/描述 处截断
+// 标题截断：在 简介/描述 处截断；整行以简介开头说明它不是标题
 function cutTitle(title) {
-  const i = String(title).search(/简介|描述/);
-  return (i > 0 ? String(title).slice(0, i) : String(title)).trim();
+  const s = String(title || '').trim();
+  const i = s.search(/简介|描述/);
+  if (i === 0) return '';
+  const t = (i > 0 ? s.slice(0, i) : s).trim();
+  return t.length > 120 ? t.slice(0, 120) + '…' : t;
 }
 
 // 从消息正文里取标题（跳过 #标签行、日期头、元数据行）
@@ -84,11 +98,13 @@ const DISK_LABEL_ONLY_RE = /^(?:阿里(?:云|云盘|网盘)?|夸克(?:网盘|云
 
 function isGoodTitle(s) {
   const t = String(s || '').trim();
-  if (t.length < 2) return false;
+  if (t.length < 2 || t.length > 100) return false;
   if (/^#/.test(t)) return false;
   if (DISK_LABEL_ONLY_RE.test(t)) return false;
   if (/^(?:https?:\/\/|magnet:|ed2k:)/i.test(t)) return false;
   if (/^\d{1,4}[年\-/.]\d{1,2}[月\-/.]\d{1,2}日?$/.test(t)) return false;
+  // 剧情简介、演员表等元数据行不是标题
+  if (/^(?:描述|简介|剧情|梗概|演员|导演|备注|说明|标签|分类|地区|年份|集数|更新|状态)[：:]/.test(t)) return false;
   // 去掉盘名标签与标点后没有实质内容，同样不算标题
   const stripped = t
     .replace(/(?:阿里|夸克|百度|UC|迅雷|天翼|123|115|移动|网盘|链接|地址|名称|资源)[云盘网盘]*[：:]?/gi, '')
@@ -829,7 +845,7 @@ return { PLUGINS, DEFAULT_PLUGINS };
 //   SEARCH_TIMEOUT_MS  单个上游请求超时毫秒（可选，默认 8000）
 //   CACHE_TTL_SECONDS  搜索结果缓存秒数（可选，默认 1800）const { searchTG } = __TG;const { PLUGINS, DEFAULT_PLUGINS } = __PIndex;const { getLinkType, cutTitle, keywordScore, ZERO_TIME } = __R;
 // 过滤/排序逻辑版本：升级时递增，让旧的 Cloudflare 缓存立即失效
-const CACHE_VERSION = 'rel5';
+const CACHE_VERSION = 'rel6';
 
 function cacheKeyOf(request) {
   const u = new URL(request.url);
